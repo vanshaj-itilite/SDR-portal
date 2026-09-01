@@ -1,9 +1,13 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Megaphone, Users, ChevronRight, UserPlus, Check } from "lucide-react";
+import { Megaphone, Users, ChevronRight, UserPlus, Check, Plus, X, Link2, Upload, FileText, Loader2 } from "lucide-react";
 import { useSDR } from "../context/SDRContext";
-import { CAMPAIGNS, getCampaignStats, type Campaign } from "../data/campaigns";
+import { useCampaigns, useCreateCampaign } from "../hooks/useCampaigns";
+import type { Campaign, CampaignType } from "../types/campaign";
 import "./Campaigns.css";
+
+const LEAD_SOURCES = ["LinkedIn", "Referral", "Cold Outreach", "Conference", "Website"];
+const CAMPAIGN_TYPES: CampaignType[] = ["Multi-channel", "Email Sequence", "Cold Call", "LinkedIn"];
 
 const TYPE_COLOR: Record<string, string> = {
   "Multi-channel":  "purple",
@@ -25,13 +29,16 @@ export default function Campaigns() {
   const { activeSdr, allSdrs } = useSDR();
   const [filter, setFilter] = useState("All");
   const [requested, setRequested] = useState<Set<string>>(new Set());
+  const [showNewModal, setShowNewModal] = useState(false);
   const navigate = useNavigate();
 
-  const visible = filter === "Assigned"
-    ? CAMPAIGNS.filter((c) => c.assignedSdrIds.includes(activeSdr.id))
-    : CAMPAIGNS;
+  const { data: campaigns = [], isLoading, isError } = useCampaigns();
 
-  const assignedCount = CAMPAIGNS.filter((c) => c.assignedSdrIds.includes(activeSdr.id)).length;
+  const visible = filter === "Assigned"
+    ? campaigns.filter((c) => c.assigned_sdr_ids.includes(activeSdr.id))
+    : campaigns;
+
+  const assignedCount = campaigns.filter((c) => c.assigned_sdr_ids.includes(activeSdr.id)).length;
 
   const handleRequest = (e: React.MouseEvent, campaignId: string) => {
     e.stopPropagation();
@@ -55,11 +62,16 @@ export default function Campaigns() {
             </button>
           ))}
         </div>
+        <button className="new-campaign-btn" onClick={() => setShowNewModal(true)}>
+          <Plus size={15} /> Start New Campaign
+        </button>
       </div>
 
       <div className="campaigns-list">
-        {visible.map((c) => {
-          const isAssigned = c.assignedSdrIds.includes(activeSdr.id);
+        {isLoading && <div className="empty-card">Loading campaigns…</div>}
+        {isError && <div className="empty-card">Couldn't load campaigns. Is the backend running?</div>}
+        {!isLoading && !isError && visible.map((c) => {
+          const isAssigned = c.assigned_sdr_ids.includes(activeSdr.id);
           const hasRequested = requested.has(c.id);
           return (
             <CampaignRow
@@ -74,10 +86,18 @@ export default function Campaigns() {
             />
           );
         })}
-        {visible.length === 0 && (
+        {!isLoading && !isError && visible.length === 0 && (
           <div className="empty-card">No campaigns found.</div>
         )}
       </div>
+
+      {showNewModal && (
+        <NewCampaignModal
+          allSdrs={allSdrs}
+          onClose={() => setShowNewModal(false)}
+          onCreated={() => setShowNewModal(false)}
+        />
+      )}
     </div>
   );
 }
@@ -99,11 +119,11 @@ function CampaignRow({
   onRequest: (e: React.MouseEvent) => void;
   onClick: () => void;
 }) {
-  const stats = getCampaignStats(campaign);
-  const assignedSdrs = allSdrs.filter((s) => campaign.assignedSdrIds.includes(s.id));
-  const myLeads = campaign.enrolledLeads.filter((l) => l.sdrId === activeSdrId).length;
-  const responseRate = stats.totalEnrolled
-    ? Math.round(((stats.responded + stats.converted) / stats.totalEnrolled) * 100)
+  const stats = campaign.stats;
+  const assignedSdrs = allSdrs.filter((s) => campaign.assigned_sdr_ids.includes(s.id));
+  const myLeads = campaign.enrolled_leads.filter((l) => l.sdr_id === activeSdrId).length;
+  const responseRate = stats.total_enrolled
+    ? Math.round(((stats.responded + stats.converted) / stats.total_enrolled) * 100)
     : 0;
 
   return (
@@ -127,7 +147,7 @@ function CampaignRow({
             <span className="sep">·</span>
             <span>{campaign.sequence.length} steps</span>
             <span className="sep">·</span>
-            <span>{campaign.startDate} → {campaign.endDate}</span>
+            <span>{campaign.start_date} → {campaign.end_date}</span>
           </div>
           <div className="campaign-goal">{campaign.goal}</div>
         </div>
@@ -135,7 +155,7 @@ function CampaignRow({
 
       <div className="campaign-row-stats">
         <div className="camp-stat">
-          <span className="camp-stat-val">{stats.totalEnrolled}</span>
+          <span className="camp-stat-val">{stats.total_enrolled}</span>
           <span className="camp-stat-label">Enrolled</span>
         </div>
         <div className="camp-stat">
@@ -189,6 +209,235 @@ function CampaignRow({
             )}
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+function NewCampaignModal({
+  allSdrs,
+  onClose,
+  onCreated,
+}: {
+  allSdrs: ReturnType<typeof useSDR>["allSdrs"];
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState<CampaignType>("Multi-channel");
+  const [goal, setGoal] = useState("");
+  const [selectedSdrIds, setSelectedSdrIds] = useState<Set<string>>(new Set());
+  const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
+  const [listMode, setListMode] = useState<"upload" | "link">("upload");
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [listLink, setListLink] = useState("");
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const createCampaign = useCreateCampaign();
+
+  const toggleSdr = (id: string) => {
+    setSelectedSdrIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSource = (source: string) => {
+    setSelectedSources((prev) => {
+      const next = new Set(prev);
+      next.has(source) ? next.delete(source) : next.add(source);
+      return next;
+    });
+  };
+
+  const canSubmit =
+    name.trim().length > 0 &&
+    selectedSdrIds.size > 0 &&
+    selectedSources.size > 0 &&
+    (listMode === "upload" ? !!fileName : listLink.trim().length > 0);
+
+  const handleSubmit = () => {
+    if (!canSubmit) return;
+    setSuccessMessage(null);
+    createCampaign.mutate(
+      {
+        name: name.trim(),
+        type,
+        goal: goal.trim(),
+        assigned_sdr_ids: [...selectedSdrIds],
+        lead_sources: [...selectedSources],
+        lead_list_mode: listMode,
+        lead_list_value: listMode === "upload" ? fileName ?? "" : listLink.trim(),
+      },
+      {
+        onSuccess: (campaign) => {
+          setSuccessMessage(`Created — ${campaign.enrolled_leads.length} leads imported.`);
+          setTimeout(onCreated, 900);
+        },
+      }
+    );
+  };
+
+  const errorMessage =
+    createCampaign.isError &&
+    ((createCampaign.error as any)?.response?.data?.detail ?? "Couldn't create the campaign. Please try again.");
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>Start New Campaign</h3>
+          <button className="modal-close" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div className="modal-field">
+            <label>Campaign name</label>
+            <input
+              type="text"
+              placeholder="e.g. Q4 Outbound Push"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+
+          <div className="modal-field">
+            <label>Campaign type</label>
+            <div className="chip-row">
+              {CAMPAIGN_TYPES.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={`chip ${type === t ? "chip-active" : ""}`}
+                  onClick={() => setType(t)}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="modal-field">
+            <label>Assign SDRs</label>
+            <div className="sdr-select-row">
+              {allSdrs.map((s) => (
+                <button
+                  type="button"
+                  key={s.id}
+                  className={`sdr-chip ${selectedSdrIds.has(s.id) ? "sdr-chip-active" : ""}`}
+                  onClick={() => toggleSdr(s.id)}
+                >
+                  <span className="mini-avatar">{s.initials}</span>
+                  {s.name}
+                  {selectedSdrIds.has(s.id) && <Check size={12} />}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="modal-field">
+            <label>Lead sources</label>
+            <div className="chip-row">
+              {LEAD_SOURCES.map((src) => (
+                <button
+                  type="button"
+                  key={src}
+                  className={`chip ${selectedSources.has(src) ? "chip-active" : ""}`}
+                  onClick={() => toggleSource(src)}
+                >
+                  {src}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="modal-field">
+            <label>Lead list</label>
+            <div className="filter-tabs list-mode-tabs">
+              <button
+                type="button"
+                className={`filter-tab ${listMode === "upload" ? "active" : ""}`}
+                onClick={() => setListMode("upload")}
+              >
+                <Upload size={13} /> Upload file
+              </button>
+              <button
+                type="button"
+                className={`filter-tab ${listMode === "link" ? "active" : ""}`}
+                onClick={() => setListMode("link")}
+              >
+                <Link2 size={13} /> Paste link
+              </button>
+            </div>
+
+            {listMode === "upload" ? (
+              <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  hidden
+                  onChange={(e) => setFileName(e.target.files?.[0]?.name ?? null)}
+                />
+                {fileName ? (
+                  <div className="upload-box-file">
+                    <FileText size={16} />
+                    <span>{fileName}</span>
+                  </div>
+                ) : (
+                  <div className="upload-box-empty">
+                    <Upload size={18} />
+                    <span>Click to upload CSV or Excel file</span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <input
+                  type="text"
+                  placeholder="https://docs.google.com/spreadsheets/..."
+                  value={listLink}
+                  onChange={(e) => setListLink(e.target.value)}
+                />
+                <p className="modal-hint">
+                  Leads are imported from this Google Sheet using your signed-in Google account —
+                  make sure it has access to the sheet.
+                </p>
+              </>
+            )}
+          </div>
+
+          <div className="modal-field">
+            <label>Goal (optional)</label>
+            <input
+              type="text"
+              placeholder="e.g. Book 20 discovery calls"
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+            />
+          </div>
+
+          {errorMessage && <p className="modal-error">{errorMessage}</p>}
+          {successMessage && <p className="modal-success">{successMessage}</p>}
+        </div>
+
+        <div className="modal-footer">
+          <button className="modal-btn-secondary" onClick={onClose}>Cancel</button>
+          <button
+            className="modal-btn-primary"
+            disabled={!canSubmit || createCampaign.isPending}
+            onClick={handleSubmit}
+          >
+            {createCampaign.isPending ? (
+              <><Loader2 size={14} className="spin" /> Creating…</>
+            ) : (
+              "Create Campaign"
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

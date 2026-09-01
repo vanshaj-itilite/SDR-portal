@@ -13,8 +13,10 @@ import {
   ChevronDown,
   UsersRound,
   Megaphone,
+  LogOut,
 } from "lucide-react";
 import { useSDR } from "../context/SDRContext";
+import { useAuth } from "../context/AuthContext";
 import "./Layout.css";
 
 const NAV = [
@@ -40,6 +42,7 @@ const PAGE_TITLES: Record<string, string> = {
 export default function Layout() {
   const { pathname } = useLocation();
   const { activeSdr, setActiveSdr, allSdrs } = useSDR();
+  const { logout } = useAuth();
   const [switcherOpen, setSwitcherOpen] = useState(false);
 
   // Match sub-routes like /campaigns/:id
@@ -97,6 +100,10 @@ export default function Layout() {
                   {sdr.id === activeSdr.id && <span className="switcher-check">✓</span>}
                 </button>
               ))}
+              <button className="switcher-item switcher-signout" onClick={logout}>
+                <LogOut size={14} />
+                <span>Sign out</span>
+              </button>
             </div>
           )}
         </div>

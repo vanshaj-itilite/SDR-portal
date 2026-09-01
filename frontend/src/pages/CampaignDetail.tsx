@@ -1,7 +1,8 @@
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Mail, Phone, Link2, Clock, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, Mail, Phone, Link2, Clock, CheckCircle2, RefreshCw } from "lucide-react";
 import { useSDR } from "../context/SDRContext";
-import { CAMPAIGNS, getCampaignStats, type CampaignStep, type CampaignLead } from "../data/campaigns";
+import { useCampaign, useSyncCampaignSheet } from "../hooks/useCampaigns";
+import type { CampaignStep, CampaignLead } from "../types/campaign";
 import "./CampaignDetail.css";
 
 const STEP_COLOR: Record<string, string> = {
@@ -30,9 +31,14 @@ export default function CampaignDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { activeSdr, allSdrs } = useSDR();
+  const { data: campaign, isLoading, isError } = useCampaign(id);
+  const syncSheet = useSyncCampaignSheet(id ?? "");
 
-  const campaign = CAMPAIGNS.find((c) => c.id === id);
-  if (!campaign) {
+  if (isLoading) {
+    return <div className="cd-not-found"><p>Loading campaign…</p></div>;
+  }
+
+  if (isError || !campaign) {
     return (
       <div className="cd-not-found">
         <p>Campaign not found.</p>
@@ -41,11 +47,11 @@ export default function CampaignDetail() {
     );
   }
 
-  const stats = getCampaignStats(campaign);
-  const assignedSdrs = allSdrs.filter((s) => campaign.assignedSdrIds.includes(s.id));
-  const myLeads = campaign.enrolledLeads.filter((l) => l.sdrId === activeSdr.id);
-  const responseRate = stats.totalEnrolled
-    ? Math.round(((stats.responded + stats.converted) / stats.totalEnrolled) * 100)
+  const stats = campaign.stats;
+  const assignedSdrs = allSdrs.filter((s) => campaign.assigned_sdr_ids.includes(s.id));
+  const myLeads = campaign.enrolled_leads.filter((l) => l.sdr_id === activeSdr.id);
+  const responseRate = stats.total_enrolled
+    ? Math.round(((stats.responded + stats.converted) / stats.total_enrolled) * 100)
     : 0;
 
   const STATUS_COLOR_MAP: Record<string, string> = {
@@ -54,6 +60,10 @@ export default function CampaignDetail() {
     Completed: "blue",
     Draft:     "gray",
   };
+
+  const syncError =
+    syncSheet.isError &&
+    ((syncSheet.error as any)?.response?.data?.detail ?? "Couldn't sync from the sheet.");
 
   return (
     <div className="cd-page">
@@ -69,14 +79,26 @@ export default function CampaignDetail() {
           </div>
           <div className="cd-header-right">
             <span className={`pill pill-${STATUS_COLOR_MAP[campaign.status]}`}>{campaign.status}</span>
-            <span className="cd-dates">{campaign.startDate} → {campaign.endDate}</span>
+            <span className="cd-dates">{campaign.start_date} → {campaign.end_date}</span>
+            {campaign.lead_list_mode === "link" && (
+              <button
+                className="btn-sync"
+                onClick={() => syncSheet.mutate()}
+                disabled={syncSheet.isPending}
+                title={campaign.lead_list_value ?? undefined}
+              >
+                <RefreshCw size={13} className={syncSheet.isPending ? "spin" : ""} />
+                {syncSheet.isPending ? "Syncing…" : "Sync from Sheet"}
+              </button>
+            )}
           </div>
         </div>
+        {syncError && <p className="cd-sync-error">{syncError}</p>}
 
         {/* Stats bar */}
         <div className="cd-stats-bar">
           <div className="cd-stat">
-            <span className="cd-stat-val">{stats.totalEnrolled}</span>
+            <span className="cd-stat-val">{stats.total_enrolled}</span>
             <span className="cd-stat-label">Enrolled</span>
           </div>
           <div className="cd-stat-divider" />
@@ -125,7 +147,7 @@ export default function CampaignDetail() {
             <div className="cd-card-title">Assigned SDRs ({assignedSdrs.length})</div>
             <div className="sdr-list">
               {assignedSdrs.map((sdr) => {
-                const sdrLeads = campaign.enrolledLeads.filter((l) => l.sdrId === sdr.id);
+                const sdrLeads = campaign.enrolled_leads.filter((l) => l.sdr_id === sdr.id);
                 const sdrConverted = sdrLeads.filter((l) => l.status === "Converted").length;
                 return (
                   <div key={sdr.id} className={`sdr-row ${sdr.id === activeSdr.id ? "sdr-row-me" : ""}`}>
@@ -154,11 +176,11 @@ export default function CampaignDetail() {
             <div className="cd-card-header">
               <div className="cd-card-title">All Enrolled Leads</div>
               <div className="view-toggle">
-                <button className="view-btn active">All ({campaign.enrolledLeads.length})</button>
+                <button className="view-btn active">All ({campaign.enrolled_leads.length})</button>
                 <button className="view-btn">Mine ({myLeads.length})</button>
               </div>
             </div>
-            {campaign.enrolledLeads.length === 0 ? (
+            {campaign.enrolled_leads.length === 0 ? (
               <p className="cd-empty">No leads enrolled yet.</p>
             ) : (
               <table className="cd-table">
@@ -173,9 +195,9 @@ export default function CampaignDetail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {campaign.enrolledLeads.map((lead) => (
+                  {campaign.enrolled_leads.map((lead) => (
                     <LeadRow
-                      key={lead.leadId}
+                      key={lead.lead_id}
                       lead={lead}
                       totalSteps={campaign.sequence.length}
                       allSdrs={allSdrs}
@@ -221,15 +243,15 @@ function LeadRow({
   allSdrs: ReturnType<typeof useSDR>["allSdrs"];
   activeSdrId: string;
 }) {
-  const sdr = allSdrs.find((s) => s.id === lead.sdrId);
-  const pct = Math.round((lead.currentStep / totalSteps) * 100);
+  const sdr = allSdrs.find((s) => s.id === lead.sdr_id);
+  const pct = totalSteps ? Math.round((lead.current_step / totalSteps) * 100) : 0;
   const isTerminal = lead.status === "Converted" || lead.status === "Unsubscribed" || lead.status === "Bounced";
 
   return (
-    <tr className={`cd-row ${lead.sdrId === activeSdrId ? "cd-row-mine" : ""}`}>
+    <tr className={`cd-row ${lead.sdr_id === activeSdrId ? "cd-row-mine" : ""}`}>
       <td>
         <div className="lead-cell">
-          <span className="lead-name">{lead.leadName}</span>
+          <span className="lead-name">{lead.lead_name}</span>
           <span className="lead-company">{lead.company}</span>
         </div>
       </td>
@@ -243,7 +265,7 @@ function LeadRow({
         {isTerminal ? (
           <span className="step-done"><CheckCircle2 size={13} /> Done</span>
         ) : (
-          <span className="step-num">Step {lead.currentStep} of {totalSteps}</span>
+          <span className="step-num">Step {lead.current_step} of {totalSteps}</span>
         )}
       </td>
       <td>
@@ -260,7 +282,7 @@ function LeadRow({
       <td>
         <span className={`pill pill-${LEAD_STATUS_COLOR[lead.status]}`}>{lead.status}</span>
       </td>
-      <td className="td-muted">{lead.lastTouched}</td>
+      <td className="td-muted">{lead.last_touched}</td>
     </tr>
   );
 }
